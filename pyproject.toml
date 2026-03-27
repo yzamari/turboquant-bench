@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turboquant-bench"
+version = "0.1.0"
+description = "Compare LLM inference with and without TurboQuant KV cache compression on Apple Silicon"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Yahav Zamari", email = "yzamari@users.noreply.github.com"},
+]
+keywords = [
+    "turboquant", "kv-cache", "quantization", "mlx", "apple-silicon",
+    "benchmark", "llm", "inference", "compression",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mlx>=0.22",
+    "mlx-lm>=0.22",
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/yzamari/turboquant-bench"
+Repository = "https://github.com/yzamari/turboquant-bench"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+tq-bench = "tq_bench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+turboquant_mac = ["codebooks/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
