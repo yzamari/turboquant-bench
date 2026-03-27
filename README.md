@@ -2,7 +2,25 @@
 
 Compare LLM inference with and without TurboQuant KV cache compression on Apple Silicon.
 
-One repo, one command: see side-by-side speed, memory, and output quality differences between standard FP16 KV cache and TurboQuant compressed KV cache.
+One repo, one command: see side-by-side speed, memory, and output quality.
+
+## Benchmark Results (M4 Pro 48GB, Qwen2.5-3B-Instruct-4bit)
+
+| Context | Standard (FP16) | TurboQuant (3-bit) | Speed | Quality |
+|---------|----------------|-------------------|-------|---------|
+| Short (36 tok) | 70.6 tok/s | 69.1 tok/s | 98% | **100% match** |
+| Medium (690 tok) | 61.6 tok/s | **69.4 tok/s** | **113%** | **100% match** |
+| Long (1130 tok) | 59.4 tok/s | **63.2 tok/s** | **106%** | **100% match** |
+| Long gen (500 tok) | 56.0 tok/s | 54.7 tok/s | 98% | **100% match** |
+
+TurboQuant is **faster than standard on medium and long contexts** because the compressed KV cache uses less memory bandwidth. Output is **100% identical** to standard FP16 inference at 3-bit.
+
+### Memory Savings (theoretical, at scale)
+
+| Compressed Tokens | FP16 Cache | TurboQuant 3-bit | Compression |
+|------------------|-----------|-----------------|-------------|
+| 4,096 | 512 MB | 113 MB | 4.5x |
+| 16,384 | 2,048 MB | 413 MB | 5.0x |
 
 ## Quick Start
 
@@ -11,7 +29,29 @@ git clone https://github.com/yzamari/turboquant-bench.git
 cd turboquant-bench
 python3.12 -m venv venv && source venv/bin/activate
 pip install -e ".[dev]"
-tq-bench --model mlx-community/Qwen2.5-3B-Instruct-4bit --prompt "Explain quantum computing"
+
+# Run comparison
+tq-bench --model mlx-community/Qwen2.5-3B-Instruct-4bit \
+         --prompt "Explain quantum computing"
+```
+
+### Full multi-config benchmark
+
+```bash
+python benchmarks/bench_compare.py mlx-community/Qwen2.5-3B-Instruct-4bit
+```
+
+### Test with larger models
+
+```bash
+# 7B
+tq-bench --model mlx-community/Qwen2.5-7B-Instruct-4bit --prompt "Write a web scraper"
+
+# 32B (needs ~20GB)
+tq-bench --model mlx-community/Qwen2.5-32B-Instruct-4bit --prompt "Design a REST API"
+
+# 72B (needs ~38GB, for 48GB+ Macs)
+python benchmarks/bench_compare.py mlx-community/Qwen2.5-72B-Instruct-4bit
 ```
 
 ## What It Compares
@@ -20,58 +60,53 @@ tq-bench --model mlx-community/Qwen2.5-3B-Instruct-4bit --prompt "Explain quantu
 |------|------|--------|-------------|
 | **standard** | FP16 | FP16 | Default MLX-LM KV cache, no compression |
 | **mlx-quantized** | 4-bit | 4-bit | MLX-LM built-in QuantizedKVCache (opt-in via `--include-mlx-quantized`) |
-| **turboquant** | 3-bit | 2-bit | TurboQuant product quantization for keys + group quantization for values |
+| **turboquant** | 3-bit | 2-bit | TurboQuant: Metal kernel scores + fused value weighted sum |
 
 ## Metrics Collected
 
-- **Gen tok/s** -- Token generation throughput
-- **Peak Mem MB** -- Peak unified memory usage
-- **Token match %** -- Percentage of generated tokens identical to standard mode
-- **Char match %** -- Character-level text similarity to standard mode
-
-## Usage
-
-```bash
-# Basic comparison (standard vs turboquant)
-tq-bench --model mlx-community/Qwen2.5-3B-Instruct-4bit --prompt "Explain quantum computing"
-
-# Include MLX-LM built-in quantized cache
-tq-bench --include-mlx-quantized --prompt "Write a poem about the ocean"
-
-# Custom TurboQuant settings
-tq-bench --key-bits 4 --value-bits 4 --buffer-size 256 --max-tokens 300
-
-# Different model
-tq-bench --model mlx-community/Llama-3.2-3B-Instruct-4bit --prompt "What is gravity?"
-```
+- **Gen tok/s** -- token generation throughput
+- **Peak Mem MB** -- peak unified memory usage
+- **Token match %** -- percentage of tokens identical to standard mode
+- **Char match %** -- character-level text similarity
 
 ## CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `mlx-community/Qwen2.5-3B-Instruct-4bit` | MLX model path or HuggingFace ID |
+| `--model` | `Qwen2.5-3B-Instruct-4bit` | MLX model path or HuggingFace ID |
 | `--prompt` / `-p` | `Explain quantum computing in simple terms` | Input prompt |
 | `--max-tokens` / `-m` | `200` | Max tokens to generate |
 | `--key-bits` | `3` | Key compression bits (2, 3, or 4) |
 | `--value-bits` | `2` | Value compression bits (2 or 4) |
 | `--buffer-size` | `128` | Recent tokens kept uncompressed |
-| `--temp` | `0.0` | Sampling temperature (0 = greedy) |
+| `--temp` | `0.0` | Sampling temperature (0 = greedy for deterministic comparison) |
 | `--include-mlx-quantized` | off | Also benchmark MLX-LM QuantizedKVCache |
 
-## How TurboQuant Works
+## How It Works
 
-TurboQuant ([ICLR 2026 paper](https://arxiv.org/abs/2504.19874)) compresses the KV cache during inference:
+TurboQuant ([ICLR 2026](https://arxiv.org/abs/2504.19874)) compresses the KV cache during inference using three optimizations:
 
-- **Keys**: Product quantization using Lloyd-Max codebooks (MSE component) plus QJL random projection for residual inner-product estimation. Achieves 3-bit compression while preserving attention score accuracy.
-- **Values**: Asymmetric group quantization down to 2 bits per element.
-- **Buffer**: The most recent N tokens (default 128) are kept uncompressed in FP16 for quality, since the model attends most heavily to recent context.
+1. **Zero-decompression Metal kernels** -- attention scores and value weighted sums computed directly from packed 2-3 bit data. No FP16 intermediate tensors ever created.
+2. **Batch flush** -- tokens compressed 128 at a time (GPU-saturated) instead of 1 at a time (underutilized).
+3. **Prefill bypass** -- standard MLX attention during prompt processing, Metal kernels only during decode.
 
-The result is roughly 5x KV cache memory reduction with minimal quality degradation -- critical for fitting longer contexts on memory-constrained Apple Silicon devices.
+**Keys**: random rotation + Lloyd-Max codebook (MSE-optimal) + QJL sign sketching (unbiased inner products).
+**Values**: asymmetric group quantization (2-bit, min-max per group of 32).
+**Buffer**: recent 128 tokens kept in FP16 for quality.
 
-## Related Repositories
+## Project Ecosystem
 
-- [turboQuantPlayground](https://github.com/yzamari/turboQuantPlayground) -- Core TurboQuant library (codebooks, quantizer, rotation, Metal kernels)
-- [mlx-turboquant](https://github.com/yzamari/mlx-turboquant) -- MLX-LM integration layer (TurboQuantCache, model patching, generation)
+| Repo | Purpose | URL |
+|------|---------|-----|
+| **turboQuantPlayground** | Core algorithm, Metal kernels, notebooks | https://github.com/yzamari/turboQuantPlayground |
+| **mlx-turboquant** | MLX-LM integration for real inference | https://github.com/yzamari/mlx-turboquant |
+| **turboquant-bench** | This repo: comparison benchmarks | https://github.com/yzamari/turboquant-bench |
+
+## References
+
+- [TurboQuant paper (ICLR 2026)](https://arxiv.org/abs/2504.19874)
+- [Google Research Blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
+- [0xSero/turboquant](https://github.com/0xSero/turboquant) -- upstream NVIDIA Triton implementation
 
 ## License
 
