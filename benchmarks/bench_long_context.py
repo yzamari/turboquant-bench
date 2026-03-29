@@ -101,7 +101,7 @@ def run_long_context_benchmark(model_path):
         return prompt
 
     # Test configs: prompt sizes that stress the KV cache
-    prompt_sizes = [1024, 2048, 4096, 8192, 16384]
+    prompt_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
     max_gen = 50  # small generation to focus on prefill + first decode steps
 
     print(f"\n{'='*90}")
